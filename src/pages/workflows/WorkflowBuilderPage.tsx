@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { DndContext, DragEndEvent, DragStartEvent, closestCenter } from '@dnd-kit/core'
 import { SortableContext, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { toast } from 'sonner'
 import { workflowService } from '@/services/workflow-service'
 import { WorkflowNode, WorkflowConnection } from '@/types/workflow-builder'
+import { convertToN8nWorkflow, convertFromN8nWorkflow } from '@/utils/n8n-converter'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -106,10 +107,12 @@ function DraggableNode({ node, onDelete }: DraggableNodeProps) {
 export default function WorkflowBuilderPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   const [nodes, setNodes] = useState<WorkflowNode[]>([])
   const [connections, setConnections] = useState<WorkflowConnection[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
+  const [isLoadingStructure, setIsLoadingStructure] = useState(false)
 
   // Fetch workflow
   const { data: workflow, isLoading, error } = useQuery({
@@ -118,14 +121,41 @@ export default function WorkflowBuilderPage() {
     enabled: !!id,
   })
 
+  // Load workflow structure from n8n
   useEffect(() => {
-    // In a real implementation, you would load the workflow structure from n8n
-    // For now, we'll start with an empty canvas
-    if (workflow) {
-      // Load nodes and connections from workflow data
-      // This would come from n8n API or stored workflow data
+    const loadWorkflowStructure = async () => {
+      if (!workflow || !workflow.n8nWorkflowId) {
+        // No n8n workflow ID, start with empty canvas
+        setNodes([])
+        setConnections([])
+        return
+      }
+
+      setIsLoadingStructure(true)
+      try {
+        const n8nWorkflow = await workflowService.getWorkflowStructure(id!)
+        const { nodes: loadedNodes, connections: loadedConnections } =
+          convertFromN8nWorkflow(n8nWorkflow)
+        setNodes(loadedNodes)
+        setConnections(loadedConnections)
+      } catch (error: any) {
+        // If workflow structure doesn't exist in n8n yet, start with empty canvas
+        if (error?.response?.status !== 404) {
+          toast.error('Failed to load workflow structure', {
+            description: error?.response?.data?.message || 'An error occurred.',
+          })
+        }
+        setNodes([])
+        setConnections([])
+      } finally {
+        setIsLoadingStructure(false)
+      }
     }
-  }, [workflow])
+
+    if (workflow) {
+      loadWorkflowStructure()
+    }
+  }, [workflow, id])
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveId(event.active.id as string)
@@ -196,35 +226,81 @@ export default function WorkflowBuilderPage() {
     )
   }
 
-  const handleSave = async () => {
-    try {
-      // In a real implementation, save to n8n via API
-      // For now, just show a success message
+  // Save workflow structure mutation
+  const saveStructureMutation = useMutation({
+    mutationFn: () => {
+      if (!workflow || !id) throw new Error('Workflow not loaded')
+      const n8nWorkflow = convertToN8nWorkflow(
+        nodes,
+        connections,
+        workflow.name,
+        workflow.description
+      )
+      return workflowService.saveWorkflowStructure(id, {
+        nodes: n8nWorkflow.nodes,
+        connections: n8nWorkflow.connections,
+        settings: n8nWorkflow.settings,
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['workflow', id] })
       toast.success('Workflow saved successfully!', {
-        description: 'The workflow structure has been saved.',
+        description: 'The workflow structure has been saved to n8n.',
       })
-    } catch (error: any) {
+    },
+    onError: (error: any) => {
       toast.error('Failed to save workflow', {
-        description: error.message || 'An error occurred while saving the workflow.',
+        description: error?.response?.data?.message || 'An error occurred while saving the workflow.',
       })
+    },
+  })
+
+  // Execute workflow mutation
+  const executeWorkflowMutation = useMutation({
+    mutationFn: () => {
+      if (!id) throw new Error('Workflow ID not available')
+      return workflowService.executeWorkflow(id)
+    },
+    onSuccess: (result) => {
+      toast.success('Workflow execution started!', {
+        description: `Execution ID: ${result.executionId}`,
+      })
+    },
+    onError: (error: any) => {
+      toast.error('Failed to execute workflow', {
+        description: error?.response?.data?.message || 'An error occurred while executing the workflow.',
+      })
+    },
+  })
+
+  const handleSave = async () => {
+    if (nodes.length === 0) {
+      toast.warning('No nodes to save', {
+        description: 'Add at least one node to the workflow before saving.',
+      })
+      return
     }
+    await saveStructureMutation.mutateAsync()
   }
 
   const handleRun = async () => {
     if (!id) return
+    if (nodes.length === 0) {
+      toast.warning('Cannot execute empty workflow', {
+        description: 'Add at least one node to the workflow before executing.',
+      })
+      return
+    }
+    // Save first, then execute
     try {
-      // In a real implementation, trigger workflow execution via API
-      toast.info('Workflow execution started', {
-        description: 'The workflow is now running.',
-      })
-    } catch (error: any) {
-      toast.error('Failed to run workflow', {
-        description: error.message || 'An error occurred while running the workflow.',
-      })
+      await saveStructureMutation.mutateAsync()
+      await executeWorkflowMutation.mutateAsync()
+    } catch (error) {
+      // Error already handled in mutation
     }
   }
 
-  if (isLoading) {
+  if (isLoading || isLoadingStructure) {
     return (
       <div className="flex items-center justify-center h-screen">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -267,13 +343,23 @@ export default function WorkflowBuilderPage() {
         </div>
 
         <div className="space-y-2 mb-6">
-          <Button onClick={handleSave} className="w-full" variant="default">
+          <Button
+            onClick={handleSave}
+            className="w-full"
+            variant="default"
+            disabled={saveStructureMutation.isPending}
+          >
             <Save className="mr-2 h-4 w-4" />
-            Save
+            {saveStructureMutation.isPending ? 'Saving...' : 'Save'}
           </Button>
-          <Button onClick={handleRun} className="w-full" variant="outline">
+          <Button
+            onClick={handleRun}
+            className="w-full"
+            variant="outline"
+            disabled={saveStructureMutation.isPending || executeWorkflowMutation.isPending}
+          >
             <Play className="mr-2 h-4 w-4" />
-            Run
+            {executeWorkflowMutation.isPending ? 'Running...' : 'Run'}
           </Button>
         </div>
 

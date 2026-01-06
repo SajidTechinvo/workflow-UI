@@ -1,5 +1,11 @@
 import apiClient from '@/lib/api'
 import { Workflow, CreateWorkflowDto, UpdateWorkflowDto } from '@/types/workflow'
+import {
+  N8nWorkflow,
+  SaveWorkflowStructureDto,
+  ExecuteWorkflowDto,
+  N8nExecutionResult,
+} from '@/types/n8n'
 
 export const workflowService = {
   async getUserWorkflows(userId: string): Promise<Workflow[]> {
@@ -35,6 +41,21 @@ export const workflowService = {
     const response = await apiClient.post<Workflow>(
       `/workflows/${workflowId}/restore/${versionId}`
     )
+    return response.data
+  },
+
+  async getWorkflowStructure(id: string): Promise<N8nWorkflow> {
+    const response = await apiClient.get<N8nWorkflow>(`/workflows/${id}/structure`)
+    return response.data
+  },
+
+  async saveWorkflowStructure(id: string, data: SaveWorkflowStructureDto): Promise<N8nWorkflow> {
+    const response = await apiClient.put<N8nWorkflow>(`/workflows/${id}/structure`, data)
+    return response.data
+  },
+
+  async executeWorkflow(id: string, data?: ExecuteWorkflowDto): Promise<N8nExecutionResult> {
+    const response = await apiClient.post<N8nExecutionResult>(`/workflows/${id}/execute`, data)
     return response.data
   },
 }
